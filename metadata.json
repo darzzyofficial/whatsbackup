@@ -1,0 +1,6 @@
+{
+  "name": "WhatsBackup",
+  "description": "A WhatsApp Web-inspired demo simulation platform featuring phone number linking codes, administrative code control, and fictional backup processing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
