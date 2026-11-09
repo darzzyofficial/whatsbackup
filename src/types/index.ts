@@ -3,6 +3,7 @@ export interface AdminConfig {
   isActive: boolean;
   updatedAt: string;
   allowConnection: boolean;
+  adminEmail?: string;
   adminUsername?: string;
   adminPassword?: string;
   autoApprove?: boolean;

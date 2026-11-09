@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Shield,
   KeyRound,
@@ -27,6 +27,9 @@ import {
   updateRemoteDeviceConnection,
   SUPABASE_TABLE_SETUP_SQL,
   loginAdminRemote,
+  logoutAdminRemote,
+  getCurrentAdminUser,
+  updateAdminPasswordRemote,
 } from '../services/supabaseClient';
 
 interface AdminPanelProps {
@@ -50,7 +53,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 }) => {
   // Authentication state
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [loginUsername, setLoginUsername] = useState<string>('');
+  const [loginEmail, setLoginEmail] = useState<string>(adminConfig.adminEmail || '');
   const [loginPassword, setLoginPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -75,112 +78,128 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [showSqlScript, setShowSqlScript] = useState<boolean>(false);
   const [sqlCopied, setSqlCopied] = useState<boolean>(false);
 
-  // Editable credentials state for inside the panel
-  const [newUsername, setNewUsername] = useState<string>(adminConfig.adminUsername || 'admin');
-  const [newPassword, setNewPassword] = useState<string>(adminConfig.adminPassword || 'admin');
+  // Password update state
+  const [newPassword, setNewPassword] = useState<string>('');
   const [credSaveSuccess, setCredSaveSuccess] = useState<boolean>(false);
+  const [credSaveError, setCredSaveError] = useState<string | null>(null);
+  const [isUpdatingPassword, setIsUpdatingPassword] = useState<boolean>(false);
 
-  // Sync internal state with external adminConfig changes from server / SSE
-  React.useEffect(() => {
+  // Check for existing active session on mount
+  useEffect(() => {
+    let isMounted = true;
+    getCurrentAdminUser(adminConfig.supabaseUrl, adminConfig.supabaseAnonKey).then((res) => {
+      if (isMounted && res.isAuthenticated) {
+        setIsAuthenticated(true);
+        if (res.email) setLoginEmail(res.email);
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, [adminConfig.supabaseUrl, adminConfig.supabaseAnonKey]);
+
+  // Sync internal state with external adminConfig changes
+  useEffect(() => {
     setCodeInput(adminConfig.linkingCode);
     setIsActive(adminConfig.isActive);
     setAllowConnection(adminConfig.allowConnection || false);
-    if (adminConfig.adminUsername) setNewUsername(adminConfig.adminUsername);
-    if (adminConfig.adminPassword) setNewPassword(adminConfig.adminPassword);
+    if (adminConfig.adminEmail) setLoginEmail(adminConfig.adminEmail);
     if (adminConfig.supabaseUrl) setSupabaseUrlInput(adminConfig.supabaseUrl);
     if (adminConfig.supabaseAnonKey) setSupabaseKeyInput(adminConfig.supabaseAnonKey);
   }, [adminConfig]);
 
-  // Handle Login submission
+  // Handle Login submission via real Supabase Auth
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
     setIsLoggingIn(true);
 
-    const inputUser = loginUsername.trim();
+    const inputEmail = loginEmail.trim();
     const inputPass = loginPassword.trim();
 
-    if (!inputUser || !inputPass) {
-      setLoginError('Please enter both username and password.');
+    if (!inputEmail || !inputPass) {
+      setLoginError('Please enter both your admin email and password.');
       setIsLoggingIn(false);
       return;
     }
 
-    // 1. Authenticate against persistent server storage first
     try {
-      const res = await loginAdminRemote(inputUser, inputPass);
-      if (res.success) {
-        if (res.data) {
-          const s = res.data;
-          const updated: AdminConfig = {
-            ...adminConfig,
-            linkingCode: s.linkingCode || adminConfig.linkingCode,
-            isActive: typeof s.isActive === 'boolean' ? s.isActive : adminConfig.isActive,
-            allowConnection: typeof s.allowConnection === 'boolean' ? s.allowConnection : adminConfig.allowConnection,
-            adminUsername: s.adminUsername || inputUser,
-            adminPassword: s.adminPassword || inputPass,
-            updatedAt: s.updatedAt || new Date().toISOString(),
-          };
-          onUpdateAdminConfig(updated);
-        }
-        setIsAuthenticated(true);
-        setLoginError(null);
-        setIsLoggingIn(false);
-        return;
-      }
-    } catch (err) {
-      // Server unreachable, proceed to local fallback
-    }
-
-    // 2. Fallback local verification (case-insensitive username to avoid mobile keyboard auto-cap issues)
-    const targetUser = (adminConfig.adminUsername || 'admin').trim();
-    const targetPass = (adminConfig.adminPassword || 'admin').trim();
-
-    if (
-      inputUser.toLowerCase() === targetUser.toLowerCase() &&
-      inputPass === targetPass
-    ) {
-      setIsAuthenticated(true);
-      setLoginError(null);
-    } else {
-      setLoginError('Invalid username or password. Please try again.');
-    }
-    setIsLoggingIn(false);
-  };
-
-  // Handle immediate Realtime Toggle of Allow Device Connection
-  const handleToggleAllowConnection = async (newValue: boolean) => {
-    setAllowConnection(newValue);
-
-    const updated: AdminConfig = {
-      ...adminConfig,
-      allowConnection: newValue,
-      linkingCode: codeInput,
-      isActive,
-      updatedAt: new Date().toISOString(),
-    };
-
-    onUpdateAdminConfig(updated);
-
-    // Immediately save to Supabase and broadcast via Supabase Realtime
-    setIsSavingRealtime(true);
-    try {
-      await updateRemoteDeviceConnection(newValue, {
-        linkingCode: codeInput,
-        isActive,
-        adminUsername: adminConfig.adminUsername,
+      const res = await loginAdminRemote(inputEmail, inputPass, {
         customUrl: adminConfig.supabaseUrl,
         customAnonKey: adminConfig.supabaseAnonKey,
       });
+
+      if (res.success) {
+        setIsAuthenticated(true);
+        setLoginError(null);
+        onUpdateAdminConfig({
+          ...adminConfig,
+          adminEmail: inputEmail,
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        setLoginError(res.error || 'Authentication failed. Please check your credentials.');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLoginError(msg);
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  // Handle Logout
+  const handleLogout = async () => {
+    await logoutAdminRemote({
+      customUrl: adminConfig.supabaseUrl,
+      customAnonKey: adminConfig.supabaseAnonKey,
+    });
+    setIsAuthenticated(false);
+    setLoginPassword('');
+    onBackToUserView();
+  };
+
+  // Handle immediate Realtime Toggle of Allow Device Connection with database confirmation
+  const handleToggleAllowConnection = async (newValue: boolean) => {
+    setValidationError(null);
+    setIsSavingRealtime(true);
+
+    try {
+      const res = await updateRemoteDeviceConnection(newValue, {
+        linkingCode: codeInput,
+        isActive,
+        adminEmail: loginEmail || adminConfig.adminEmail,
+        customUrl: adminConfig.supabaseUrl,
+        customAnonKey: adminConfig.supabaseAnonKey,
+      });
+
+      if (!res.success) {
+        setValidationError(res.error || 'Failed to update device connection in database.');
+        return;
+      }
+
+      setAllowConnection(newValue);
+      const updated: AdminConfig = {
+        ...adminConfig,
+        allowConnection: newValue,
+        linkingCode: codeInput,
+        isActive,
+        updatedAt: new Date().toISOString(),
+      };
+      onUpdateAdminConfig(updated);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setValidationError(msg);
     } finally {
       setIsSavingRealtime(false);
     }
   };
 
-  // Handle Save Configuration
+  // Handle Save Configuration with database confirmation
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setValidationError(null);
+    setSaveSuccess(false);
 
     const sanitized = codeInput.replace(/[-\s]/g, '').toUpperCase();
 
@@ -194,32 +213,38 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       return;
     }
 
-    const updated: AdminConfig = {
-      ...adminConfig,
-      linkingCode: sanitized,
-      isActive,
-      allowConnection,
-      updatedAt: new Date().toISOString(),
-    };
-
-    onUpdateAdminConfig(updated);
-    setSaveSuccess(true);
-
-    // Sync to Supabase & Realtime
     setIsSavingRealtime(true);
     try {
-      await updateRemoteDeviceConnection(allowConnection, {
+      const res = await updateRemoteDeviceConnection(allowConnection, {
         linkingCode: sanitized,
         isActive,
-        adminUsername: adminConfig.adminUsername,
+        adminEmail: loginEmail || adminConfig.adminEmail,
         customUrl: adminConfig.supabaseUrl,
         customAnonKey: adminConfig.supabaseAnonKey,
       });
+
+      if (!res.success) {
+        setValidationError(res.error || 'Failed to save configuration to Supabase.');
+        return;
+      }
+
+      const updated: AdminConfig = {
+        ...adminConfig,
+        linkingCode: sanitized,
+        isActive,
+        allowConnection,
+        updatedAt: new Date().toISOString(),
+      };
+
+      onUpdateAdminConfig(updated);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2500);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setValidationError(msg);
     } finally {
       setIsSavingRealtime(false);
     }
-
-    setTimeout(() => setSaveSuccess(false), 2500);
   };
 
   // Handle Save Supabase Credentials
@@ -244,68 +269,80 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setTimeout(() => setSqlCopied(false), 2000);
   };
 
-  // Handle Save Credentials
-  const handleSaveCredentials = (e: React.FormEvent) => {
+  // Handle Admin Password Update
+  const handleSavePassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newUsername.trim() || !newPassword.trim()) return;
+    setCredSaveError(null);
+    setCredSaveSuccess(false);
 
-    const updated: AdminConfig = {
-      ...adminConfig,
-      adminUsername: newUsername.trim(),
-      adminPassword: newPassword.trim(),
-      updatedAt: new Date().toISOString(),
-    };
+    if (!newPassword.trim()) {
+      setCredSaveError('Please enter a new password.');
+      return;
+    }
 
-    onUpdateAdminConfig(updated);
-    setCredSaveSuccess(true);
+    if (newPassword.trim().length < 6) {
+      setCredSaveError('Password must be at least 6 characters.');
+      return;
+    }
 
-    // Save to server
-    updateRemoteDeviceConnection(adminConfig.allowConnection, {
-      linkingCode: adminConfig.linkingCode,
-      isActive: adminConfig.isActive,
-      adminUsername: newUsername.trim(),
-      adminPassword: newPassword.trim(),
-      customUrl: adminConfig.supabaseUrl,
-      customAnonKey: adminConfig.supabaseAnonKey,
-    });
+    setIsUpdatingPassword(true);
+    try {
+      const res = await updateAdminPasswordRemote(newPassword.trim(), {
+        customUrl: adminConfig.supabaseUrl,
+        customAnonKey: adminConfig.supabaseAnonKey,
+      });
 
-    setTimeout(() => setCredSaveSuccess(false), 2500);
+      if (res.success) {
+        setCredSaveSuccess(true);
+        setNewPassword('');
+        setTimeout(() => setCredSaveSuccess(false), 2500);
+      } else {
+        setCredSaveError(res.error || 'Failed to update password.');
+      }
+    } finally {
+      setIsUpdatingPassword(false);
+    }
   };
 
-  // Reset to default
-  const handleResetToDefault = () => {
+  // Reset linking code to default
+  const handleResetToDefault = async () => {
     setCodeInput('G5KPWFAA');
     setIsActive(true);
-    setAllowConnection(false);
     setValidationError(null);
 
-    const updated: AdminConfig = {
-      ...adminConfig,
-      linkingCode: 'G5KPWFAA',
-      isActive: true,
-      allowConnection: false,
-      updatedAt: new Date().toISOString(),
-    };
+    setIsSavingRealtime(true);
+    try {
+      const res = await updateRemoteDeviceConnection(false, {
+        linkingCode: 'G5KPWFAA',
+        isActive: true,
+        adminEmail: loginEmail || adminConfig.adminEmail,
+        customUrl: adminConfig.supabaseUrl,
+        customAnonKey: adminConfig.supabaseAnonKey,
+      });
 
-    onUpdateAdminConfig(updated);
-    setSaveSuccess(true);
-
-    // Save to server
-    updateRemoteDeviceConnection(false, {
-      linkingCode: 'G5KPWFAA',
-      isActive: true,
-      adminUsername: adminConfig.adminUsername,
-      adminPassword: adminConfig.adminPassword,
-      customUrl: adminConfig.supabaseUrl,
-      customAnonKey: adminConfig.supabaseAnonKey,
-    });
-
-    setTimeout(() => setSaveSuccess(false), 2500);
+      if (res.success) {
+        setAllowConnection(false);
+        const updated: AdminConfig = {
+          ...adminConfig,
+          linkingCode: 'G5KPWFAA',
+          isActive: true,
+          allowConnection: false,
+          updatedAt: new Date().toISOString(),
+        };
+        onUpdateAdminConfig(updated);
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 2500);
+      } else {
+        setValidationError(res.error || 'Failed to reset settings in database.');
+      }
+    } finally {
+      setIsSavingRealtime(false);
+    }
   };
 
   // Generate random 8-character demo code suggestion
   const handleGenerateRandomCode = () => {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // excluding ambiguous chars
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let result = '';
     for (let i = 0; i < 8; i++) {
       result += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -333,39 +370,39 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
             <h2 className="text-base sm:text-lg font-bold">Admin Authorization</h2>
             <p className="text-[11px] sm:text-xs text-emerald-100 mt-0.5 sm:mt-1">
-              Enter administrator credentials to access backend controls
+              Authenticate via Supabase to access backend management
             </p>
           </div>
 
           {/* Form */}
           <form onSubmit={handleLogin} className="p-4 sm:p-6 space-y-3.5 sm:space-y-4 bg-white dark:bg-[#111b21]">
             {loginError && (
-              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
-                <span>{loginError}</span>
+              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
+                <span className="leading-relaxed">{loginError}</span>
               </div>
             )}
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                Admin Username
+                Admin Email
               </label>
               <div className="relative">
                 <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
                   <User className="w-4 h-4" />
                 </span>
                 <input
-                  type="text"
-                  value={loginUsername}
+                  type="email"
+                  value={loginEmail}
                   onChange={(e) => {
-                    setLoginUsername(e.target.value);
+                    setLoginEmail(e.target.value);
                     setLoginError(null);
                   }}
-                  placeholder="admin"
+                  placeholder="admin@example.com"
                   autoCapitalize="none"
                   autoCorrect="off"
                   spellCheck={false}
-                  autoComplete="username"
+                  autoComplete="email"
                   required
                   className="w-full pl-9 pr-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#202c33] text-base sm:text-sm text-slate-900 dark:text-white focus:outline-hidden focus:border-[#00a884] focus:bg-white dark:focus:bg-[#111b21]"
                 />
@@ -425,7 +462,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
             <div className="pt-3 border-t border-slate-200 dark:border-slate-800 text-center">
               <p className="text-[11px] text-slate-400">
-                Default: <span className="font-mono text-slate-600 dark:text-slate-300 font-semibold">admin</span> / <span className="font-mono text-slate-600 dark:text-slate-300 font-semibold">admin</span>
+                Log in with the verified admin email created in your Supabase Auth dashboard.
               </p>
             </div>
           </form>
@@ -450,13 +487,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
         <div className="flex items-center gap-2">
           <span className="text-[11px] sm:text-xs px-2 sm:px-2.5 py-1 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium">
-            Logged in: <strong className="font-mono">{adminConfig.adminUsername || 'admin'}</strong>
+            Logged in: <strong className="font-mono">{loginEmail || adminConfig.adminEmail || 'admin'}</strong>
           </span>
           <button
-            onClick={() => {
-              setIsAuthenticated(false);
-              onBackToUserView();
-            }}
+            onClick={handleLogout}
             className="flex items-center gap-1 text-[11px] sm:text-xs px-2 sm:px-2.5 py-1 rounded-full bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 hover:bg-rose-200 dark:hover:bg-rose-900 transition-colors cursor-pointer"
             title="Log Out of Admin"
           >
@@ -668,7 +702,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               {saveSuccess && (
                 <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-700 dark:text-emerald-300 flex items-center gap-2 animate-in fade-in">
                   <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
-                  <span>Configuration saved successfully! Changes are immediately active in the User Panel.</span>
+                  <span>Configuration saved successfully to Supabase! Changes are live across all devices.</span>
                 </div>
               )}
 
@@ -676,69 +710,63 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               <div className="flex items-center gap-3 pt-2">
                 <button
                   type="submit"
-                  className="px-5 py-2.5 rounded-xl bg-[#075E54] hover:bg-[#128C7E] text-white font-semibold text-xs shadow-md transition-colors flex items-center gap-2"
+                  disabled={isSavingRealtime}
+                  className="px-5 py-2.5 rounded-xl bg-[#075E54] hover:bg-[#128C7E] disabled:opacity-75 text-white font-semibold text-xs shadow-md transition-colors flex items-center gap-2 cursor-pointer"
                 >
-                  <Check className="w-4 h-4" />
+                  {isSavingRealtime ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
                   <span>Save Configuration</span>
                 </button>
               </div>
             </div>
           </form>
 
-          {/* SECTION: ADMIN CREDENTIALS CONFIGURATION */}
-          <form onSubmit={handleSaveCredentials} className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-800">
+          {/* SECTION: ADMIN PASSWORD UPDATE */}
+          <form onSubmit={handleSavePassword} className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-800">
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
                 <Lock className="w-4 h-4 text-[#075E54] dark:text-[#25D366]" />
-                Admin Credentials (Username & Password)
+                Admin Password Management
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Change your admin credentials anytime so only you can access this panel.
+                Update your Supabase administrator password directly.
               </p>
             </div>
 
             <div className="p-4 rounded-xl bg-slate-50 dark:bg-[#182229] border border-slate-200 dark:border-slate-800 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Username:
-                  </label>
-                  <input
-                    type="text"
-                    value={newUsername}
-                    onChange={(e) => setNewUsername(e.target.value)}
-                    required
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#111b21] text-xs font-mono font-semibold text-slate-900 dark:text-white focus:outline-hidden focus:border-[#00a884]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Password:
-                  </label>
-                  <input
-                    type="text"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    required
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#111b21] text-xs font-mono font-semibold text-slate-900 dark:text-white focus:outline-hidden focus:border-[#00a884]"
-                  />
-                </div>
+              <div className="max-w-md">
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  New Admin Password:
+                </label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Enter at least 6 characters"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#111b21] text-xs font-mono font-semibold text-slate-900 dark:text-white focus:outline-hidden focus:border-[#00a884]"
+                />
               </div>
+
+              {credSaveError && (
+                <div className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+                  <span>{credSaveError}</span>
+                </div>
+              )}
 
               {credSaveSuccess && (
                 <div className="p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
-                  <span>Credentials updated successfully! Use your new username/password next time.</span>
+                  <span>Password updated successfully in Supabase Auth!</span>
                 </div>
               )}
 
               <button
                 type="submit"
-                className="px-4 py-2 rounded-xl bg-[#075E54] hover:bg-[#128C7E] text-white font-semibold text-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                disabled={isUpdatingPassword}
+                className="px-4 py-2 rounded-xl bg-[#075E54] hover:bg-[#128C7E] disabled:opacity-75 text-white font-semibold text-xs transition-colors flex items-center gap-1.5 cursor-pointer"
               >
-                <Check className="w-3.5 h-3.5" />
-                <span>Save New Credentials</span>
+                {isUpdatingPassword ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                <span>Update Password</span>
               </button>
             </div>
           </form>
@@ -771,7 +799,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 ) : (
                   <>
                     <WifiOff className="w-3 h-3 text-slate-400" />
-                    <span className="text-slate-500">Local Multi-Tab Sync</span>
+                    <span className="text-slate-500">Offline / Local Mode</span>
                   </>
                 )}
               </div>
@@ -797,17 +825,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Supabase Anon / Public API Key:
+                    Supabase Anon / Publishable API Key:
                   </label>
                   <input
                     type="password"
                     value={supabaseKeyInput}
                     onChange={(e) => setSupabaseKeyInput(e.target.value)}
-                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..."
+                    placeholder="sb_publishable_... or eyJhbGciOi..."
                     className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#111b21] text-xs font-mono text-slate-900 dark:text-white focus:outline-hidden focus:border-[#00a884]"
                   />
                   <span className="text-[10px] text-slate-400 mt-0.5 block">
-                    Found in Supabase Project Settings &rarr; API &rarr; Project API keys (anon public)
+                    Accepts sb_publishable_... or legacy anon key. Never enter service_role secret key.
                   </span>
                 </div>
               </div>
@@ -943,7 +971,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   <span>AUTHENTICATED</span>
                 </div>
               )}
-              {backupHistory.map((h, i) => (
+              {backupHistory.map((h) => (
                 <div key={h.id} className="flex items-center justify-between text-slate-500">
                   <span>[ARCHIVE] Backup {h.id} processed ({h.totalSizeFormatted})</span>
                   <span>COMPLETED</span>
@@ -955,7 +983,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
         {/* Footer */}
         <div className="px-6 py-4 bg-[#f0f2f5] dark:bg-[#202c33] border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-          <span>Admin configuration state persisted locally in session</span>
+          <span>Authoritative data managed via Supabase Cloud Realtime</span>
           <button
             onClick={onBackToUserView}
             className="px-4 py-2 rounded-lg bg-[#075E54] hover:bg-[#128C7E] text-white font-medium text-xs transition-colors"

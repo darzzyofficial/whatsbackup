@@ -14,6 +14,7 @@ import { AdminConfig, LinkedDevice, BackupCategory, BackupRecord, CategoryId, Re
 import {
   subscribeToDeviceConnectionRealtime,
   updateRemoteDeviceConnection,
+  fetchRemoteAdminSettings,
 } from './services/supabaseClient';
 
 export default function App() {
@@ -101,9 +102,26 @@ export default function App() {
     localStorage.setItem('whatsbackup_history', JSON.stringify(backupHistory));
   }, [backupHistory]);
 
-  // SUPABASE REALTIME SUBSCRIPTION
-  // Subscribes to table postgres_changes + Realtime broadcast + cross-tab synchronization
+  // SUPABASE AUTHORITATIVE INITIAL LOAD & REALTIME SUBSCRIPTION
+  // Loads latest live settings from Supabase on startup, then listens to Realtime changes
   useEffect(() => {
+    let isMounted = true;
+
+    // 1. Authoritative initial fetch from Supabase
+    fetchRemoteAdminSettings(adminConfig.supabaseUrl, adminConfig.supabaseAnonKey).then((remote) => {
+      if (remote && isMounted) {
+        setAdminConfig((prev) => ({
+          ...prev,
+          allowConnection: remote.device_connection_enabled,
+          linkingCode: remote.linking_code || prev.linkingCode,
+          isActive: remote.is_active ?? prev.isActive,
+          adminEmail: remote.updated_by || prev.adminEmail,
+          updatedAt: remote.updated_at || prev.updatedAt,
+        }));
+      }
+    });
+
+    // 2. Realtime WebSocket subscription (updates across incognito, normal, and mobile)
     const unsubscribe = subscribeToDeviceConnectionRealtime(
       (enabled, data) => {
         setAdminConfig((prev) => ({
@@ -111,8 +129,8 @@ export default function App() {
           allowConnection: enabled,
           linkingCode: data?.linking_code || prev.linkingCode,
           isActive: data?.is_active ?? prev.isActive,
-          adminUsername: data?.admin_username || data?.updated_by || prev.adminUsername,
-          adminPassword: data?.admin_password || prev.adminPassword,
+          adminEmail: data?.updated_by || prev.adminEmail,
+          adminUsername: data?.admin_username || prev.adminUsername,
           updatedAt: data?.updated_at || prev.updatedAt,
         }));
       },
@@ -126,6 +144,7 @@ export default function App() {
     );
 
     return () => {
+      isMounted = false;
       unsubscribe();
     };
   }, [adminConfig.supabaseUrl, adminConfig.supabaseAnonKey]);
