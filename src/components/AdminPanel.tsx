@@ -98,15 +98,29 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     };
   }, [adminConfig.supabaseUrl, adminConfig.supabaseAnonKey]);
 
-  // Sync internal state with external adminConfig changes
+  // Prevent background sync from overwriting active user typing
+  const isEditingCodeRef = React.useRef(false);
+  const lastSavedCodeRef = React.useRef(adminConfig.linkingCode);
+
+  // Sync internal state with external adminConfig changes without interrupting user typing
   useEffect(() => {
-    setCodeInput(adminConfig.linkingCode);
+    if (!isEditingCodeRef.current && adminConfig.linkingCode !== lastSavedCodeRef.current) {
+      setCodeInput(adminConfig.linkingCode);
+      lastSavedCodeRef.current = adminConfig.linkingCode;
+    }
+  }, [adminConfig.linkingCode]);
+
+  useEffect(() => {
     setIsActive(adminConfig.isActive);
+  }, [adminConfig.isActive]);
+
+  useEffect(() => {
     setAllowConnection(adminConfig.allowConnection || false);
+  }, [adminConfig.allowConnection]);
+
+  useEffect(() => {
     if (adminConfig.adminEmail) setLoginEmail(adminConfig.adminEmail);
-    if (adminConfig.supabaseUrl) setSupabaseUrlInput(adminConfig.supabaseUrl);
-    if (adminConfig.supabaseAnonKey) setSupabaseKeyInput(adminConfig.supabaseAnonKey);
-  }, [adminConfig]);
+  }, [adminConfig.adminEmail]);
 
   // Handle Login submission via real Supabase Auth
   const handleLogin = async (e: React.FormEvent) => {
@@ -236,6 +250,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         updatedAt: new Date().toISOString(),
       };
 
+      lastSavedCodeRef.current = sanitized;
+      isEditingCodeRef.current = false;
       onUpdateAdminConfig(updated);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2500);
@@ -306,6 +322,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   // Reset linking code to default
   const handleResetToDefault = async () => {
+    isEditingCodeRef.current = false;
     setCodeInput('G5KPWFAA');
     setIsActive(true);
     setValidationError(null);
@@ -321,6 +338,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       });
 
       if (res.success) {
+        lastSavedCodeRef.current = 'G5KPWFAA';
         setAllowConnection(false);
         const updated: AdminConfig = {
           ...adminConfig,
@@ -342,6 +360,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   // Generate random 8-character demo code suggestion
   const handleGenerateRandomCode = () => {
+    isEditingCodeRef.current = true;
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let result = '';
     for (let i = 0; i < 8; i++) {
@@ -602,7 +621,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       type="text"
                       maxLength={8}
                       value={codeInput}
+                      onFocus={() => {
+                        isEditingCodeRef.current = true;
+                      }}
+                      onBlur={() => {
+                        isEditingCodeRef.current = false;
+                      }}
                       onChange={(e) => {
+                        isEditingCodeRef.current = true;
                         setCodeInput(e.target.value.toUpperCase());
                         setValidationError(null);
                       }}

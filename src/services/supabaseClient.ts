@@ -502,11 +502,11 @@ export function subscribeToDeviceConnectionRealtime(
   document.addEventListener('visibilitychange', handleVisibilityChange);
   window.addEventListener('focus', handleFocus);
 
-  // 3. Fallback heartbeat polling every 4 seconds to ensure state stays in sync
+  // 3. Fallback heartbeat polling every 30 seconds to ensure state stays in sync
   const pollInterval = setInterval(() => {
     if (!isSubscribed) return;
     fetchLatest();
-  }, 4000);
+  }, 30000);
 
   // 4. Same-browser instant BroadcastChannel listener
   const handleLocalMessage = (event: MessageEvent) => {

@@ -124,15 +124,28 @@ export default function App() {
     // 2. Realtime WebSocket subscription (updates across incognito, normal, and mobile)
     const unsubscribe = subscribeToDeviceConnectionRealtime(
       (enabled, data) => {
-        setAdminConfig((prev) => ({
-          ...prev,
-          allowConnection: enabled,
-          linkingCode: data?.linking_code || prev.linkingCode,
-          isActive: data?.is_active ?? prev.isActive,
-          adminEmail: data?.updated_by || prev.adminEmail,
-          adminUsername: data?.admin_username || prev.adminUsername,
-          updatedAt: data?.updated_at || prev.updatedAt,
-        }));
+        setAdminConfig((prev) => {
+          const nextCode = data?.linking_code || prev.linkingCode;
+          const nextActive = data?.is_active ?? prev.isActive;
+          const nextEmail = data?.updated_by || prev.adminEmail;
+          if (
+            prev.allowConnection === enabled &&
+            prev.linkingCode === nextCode &&
+            prev.isActive === nextActive &&
+            prev.adminEmail === nextEmail
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            allowConnection: enabled,
+            linkingCode: nextCode,
+            isActive: nextActive,
+            adminEmail: nextEmail,
+            adminUsername: data?.admin_username || prev.adminUsername,
+            updatedAt: data?.updated_at || prev.updatedAt,
+          };
+        });
       },
       (status) => {
         setSyncStatus(status);
