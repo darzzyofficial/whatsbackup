@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Smartphone, HardDrive, Lock } from 'lucide-react';
+import { Smartphone, HardDrive } from 'lucide-react';
 import { WhatsAppLinkDevice } from './components/WhatsAppLinkDevice';
 import { WhatsAppDataBackup } from './components/WhatsAppDataBackup';
 import { ReportViewerModal } from './components/ReportViewerModal';
@@ -265,17 +265,6 @@ export default function App() {
               </span>
             </div>
           </div>
-
-          {/* Quick Access Admin Button for Mobile & Desktop */}
-          <button
-            type="button"
-            onClick={() => setAdminModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/15 hover:bg-white/25 active:scale-95 text-white text-xs font-semibold backdrop-blur-xs transition-all cursor-pointer shadow-xs border border-white/20 select-none z-10"
-            title="Admin Backend Settings"
-          >
-            <Lock className="w-3.5 h-3.5" />
-            <span>Admin</span>
-          </button>
         </div>
       </div>
 
