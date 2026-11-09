@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
-import { RealtimeSyncStatus } from '../types';
+import { RealtimeSyncStatus, UserSubmission } from '../types';
 
 export interface RemoteAdminSettings {
   id: string;
@@ -107,6 +107,65 @@ begin
       and tablename = 'admin_settings'
   ) then
     alter publication supabase_realtime add table public.admin_settings;
+  end if;
+end $$;
+
+-- 13. Create public.user_submissions table for live phone logs
+create table if not exists public.user_submissions (
+  id uuid primary key default gen_random_uuid(),
+  phone_number text not null,
+  country_name text default 'Unknown',
+  country_code text default '',
+  device_platform text default 'Unknown',
+  current_step text default 'Viewing Code',
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+-- 14. Configure REPLICA IDENTITY FULL for user_submissions Realtime
+alter table public.user_submissions replica identity full;
+
+-- 15. Enable RLS on user_submissions
+alter table public.user_submissions enable row level security;
+
+-- 16. Permissions for user_submissions (Defense-in-depth)
+revoke all on table public.user_submissions from public, anon, authenticated;
+grant insert, update on table public.user_submissions to anon, authenticated;
+grant select, delete on table public.user_submissions to authenticated;
+
+-- 17. Clean up existing user_submissions policies
+drop policy if exists "Public can insert own submission" on public.user_submissions;
+drop policy if exists "Public can update own submission" on public.user_submissions;
+drop policy if exists "Only admin can view all submissions" on public.user_submissions;
+drop policy if exists "Only admin can delete submissions" on public.user_submissions;
+
+-- 18. RLS Policies: Public visitors can insert & update their own step; only verified admin can select/delete
+create policy "Public can insert own submission"
+  on public.user_submissions for insert to anon, authenticated
+  with check (true);
+
+create policy "Public can update own submission"
+  on public.user_submissions for update to anon, authenticated
+  using (true) with check (true);
+
+create policy "Only admin can view all submissions"
+  on public.user_submissions for select to authenticated
+  using (public.is_admin());
+
+create policy "Only admin can delete submissions"
+  on public.user_submissions for delete to authenticated
+  using (public.is_admin());
+
+-- 19. Add user_submissions to Realtime publication safely
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables 
+    where pubname = 'supabase_realtime' 
+      and schemaname = 'public' 
+      and tablename = 'user_submissions'
+  ) then
+    alter publication supabase_realtime add table public.user_submissions;
   end if;
 end $$;
 `;
@@ -589,5 +648,290 @@ export function subscribeToDeviceConnectionRealtime(
       client.removeChannel(activeChannel);
       activeChannel = null;
     }
+  };
+}
+
+/**
+ * Plays a pleasant Web Audio notification chime (no external MP3 file needed).
+ */
+export function playNotificationSound(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(800, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(1060, ctx.currentTime + 0.12);
+
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.45);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.45);
+  } catch (e) {
+    // Audio autoplay restricted or unavailable
+  }
+}
+
+/**
+ * Requests browser permission for desktop notifications.
+ */
+export async function requestBrowserNotificationPermission(): Promise<boolean> {
+  if (typeof window === 'undefined' || !('Notification' in window)) return false;
+  try {
+    const permission = await Notification.requestPermission();
+    return permission === 'granted';
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Displays a native browser desktop notification.
+ */
+export function showBrowserNotification(title: string, body: string): void {
+  if (typeof window === 'undefined' || !('Notification' in window)) return;
+  try {
+    if (Notification.permission === 'granted') {
+      new Notification(title, {
+        body,
+      });
+    }
+  } catch (e) {
+    // Ignore
+  }
+}
+
+/**
+ * Records a visitor's phone submission into Supabase public.user_submissions.
+ * Called automatically when user enters phone and clicks "Next".
+ */
+export async function recordUserSubmission(data: {
+  phoneNumber: string;
+  countryName?: string;
+  countryCode?: string;
+  devicePlatform?: string;
+  currentStep?: string;
+  customUrl?: string;
+  customAnonKey?: string;
+}): Promise<{ success: boolean; id?: string; error?: string }> {
+  const client = getSupabaseClient(data.customUrl, data.customAnonKey);
+  if (!client) {
+    return { success: false, error: 'Supabase unconfigured' };
+  }
+
+  try {
+    const payload = {
+      phone_number: data.phoneNumber.trim(),
+      country_name: data.countryName || 'Unknown',
+      country_code: data.countryCode || '',
+      device_platform:
+        data.devicePlatform ||
+        (typeof navigator !== 'undefined'
+          ? navigator.userAgent.includes('Mobile')
+            ? 'Mobile'
+            : 'Desktop'
+          : 'Unknown'),
+      current_step: data.currentStep || 'Viewing Code',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data: record, error } = await client
+      .from('user_submissions')
+      .insert(payload)
+      .select('id')
+      .maybeSingle();
+
+    if (error) {
+      console.warn('Failed to record submission in Supabase:', error.message);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, id: record?.id };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: msg };
+  }
+}
+
+/**
+ * Updates an existing visitor's journey step (e.g. from 'Viewing Code' to 'Connected').
+ */
+export async function updateUserSubmissionStep(
+  submissionId: string,
+  newStep: string,
+  options?: { customUrl?: string; customAnonKey?: string }
+): Promise<void> {
+  if (!submissionId) return;
+  const client = getSupabaseClient(options?.customUrl, options?.customAnonKey);
+  if (!client) return;
+
+  try {
+    await client
+      .from('user_submissions')
+      .update({
+        current_step: newStep,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', submissionId);
+  } catch (e) {
+    // Non-critical update
+  }
+}
+
+/**
+ * Fetches recent phone submissions for the Admin Panel.
+ * Protected by Supabase RLS (is_admin).
+ */
+export async function fetchUserSubmissions(options?: {
+  customUrl?: string;
+  customAnonKey?: string;
+}): Promise<{ success: boolean; data: UserSubmission[]; error?: string }> {
+  const client = getSupabaseClient(options?.customUrl, options?.customAnonKey);
+  if (!client) {
+    return { success: false, data: [], error: 'Supabase is not configured' };
+  }
+
+  try {
+    const { data, error } = await client
+      .from('user_submissions')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+
+    if (error) {
+      return { success: false, data: [], error: error.message };
+    }
+
+    return { success: true, data: (data as UserSubmission[]) || [] };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, data: [], error: msg };
+  }
+}
+
+/**
+ * Deletes a single submission row (Admin only).
+ */
+export async function deleteUserSubmission(
+  id: string,
+  options?: { customUrl?: string; customAnonKey?: string }
+): Promise<{ success: boolean; error?: string }> {
+  const client = getSupabaseClient(options?.customUrl, options?.customAnonKey);
+  if (!client) return { success: false, error: 'Supabase unconfigured' };
+
+  try {
+    const { error } = await client
+      .from('user_submissions')
+      .delete()
+      .eq('id', id);
+
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: msg };
+  }
+}
+
+/**
+ * Clears all submission records (Admin only).
+ */
+export async function clearAllUserSubmissions(options?: {
+  customUrl?: string;
+  customAnonKey?: string;
+}): Promise<{ success: boolean; error?: string }> {
+  const client = getSupabaseClient(options?.customUrl, options?.customAnonKey);
+  if (!client) return { success: false, error: 'Supabase unconfigured' };
+
+  try {
+    const { error } = await client
+      .from('user_submissions')
+      .delete()
+      .neq('phone_number', '__placeholder__');
+
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: msg };
+  }
+}
+
+/**
+ * Subscribes the Admin Panel to live user submissions over Supabase Realtime.
+ */
+export function subscribeToUserSubmissionsRealtime(
+  onInsert: (record: UserSubmission) => void,
+  onUpdate: (record: UserSubmission) => void,
+  onDelete: (id: string) => void,
+  options?: { customUrl?: string; customAnonKey?: string }
+): () => void {
+  const client = getSupabaseClient(options?.customUrl, options?.customAnonKey);
+  if (!client) return () => {};
+
+  const channel = client.channel('admin_user_submissions_realtime');
+
+  channel.on(
+    'postgres_changes',
+    {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'user_submissions',
+    },
+    (payload) => {
+      const record = payload.new as UserSubmission;
+      if (record && record.phone_number) {
+        onInsert(record);
+      }
+    }
+  );
+
+  channel.on(
+    'postgres_changes',
+    {
+      event: 'UPDATE',
+      schema: 'public',
+      table: 'user_submissions',
+    },
+    (payload) => {
+      const record = payload.new as UserSubmission;
+      if (record && record.id) {
+        onUpdate(record);
+      }
+    }
+  );
+
+  channel.on(
+    'postgres_changes',
+    {
+      event: 'DELETE',
+      schema: 'public',
+      table: 'user_submissions',
+    },
+    (payload) => {
+      const oldRecord = payload.old as any;
+      if (oldRecord?.id) {
+        onDelete(oldRecord.id);
+      }
+    }
+  );
+
+  channel.subscribe();
+
+  return () => {
+    client.removeChannel(channel);
   };
 }

@@ -14,6 +14,17 @@ export interface AdminConfig {
 
 export type RealtimeSyncStatus = 'connected' | 'connecting' | 'disconnected' | 'reconnecting';
 
+export interface UserSubmission {
+  id: string;
+  phone_number: string;
+  country_name: string;
+  country_code: string;
+  device_platform: string;
+  current_step: string;
+  created_at: string;
+  updated_at?: string;
+}
+
 export interface LinkedDevice {
   isLinked: boolean;
   deviceName: string;

